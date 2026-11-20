@@ -1,0 +1,154 @@
+:root {
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --sidebar: #efede6;
+  --border: #dedbd2;
+  --text: #222326;
+  --muted: #6c6e75;
+  --accent: #3b5bdb;
+  --accent-soft: #edf1fd;
+  --accent-fg: #ffffff;
+  --dot: #3b5bdb;
+  --danger: #c92a2a;
+  --success: #2b8a3e;
+  --shadow: 0 1px 2px rgba(20, 22, 26, 0.05);
+}
+
+:root[data-theme='dark'] {
+  --bg: #15171b;
+  --surface: #1c1f25;
+  --sidebar: #181a20;
+  --border: #2c303a;
+  --text: #e8eaef;
+  --muted: #9398a3;
+  --accent: #6884f7;
+  --accent-soft: #222a42;
+  --accent-fg: #ffffff;
+  --dot: #748ffc;
+  --danger: #ff6b6b;
+  --success: #51cf66;
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    --bg: #15171b;
+    --surface: #1c1f25;
+    --sidebar: #181a20;
+    --border: #2c303a;
+    --text: #e8eaef;
+    --muted: #9398a3;
+    --accent: #6884f7;
+    --accent-soft: #222a42;
+    --accent-fg: #ffffff;
+    --dot: #748ffc;
+    --danger: #ff6b6b;
+    --success: #51cf66;
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  width: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+  border: 1px solid transparent;
+  background: transparent;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.markdown-body {
+  font-size: 15px;
+  line-height: 1.75;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.markdown-body h1,
+.markdown-body h2,
+.markdown-body h3 {
+  margin: 1.1em 0 0.45em;
+  line-height: 1.35;
+  font-weight: 600;
+}
+
+.markdown-body h1 { font-size: 1.35em; }
+.markdown-body h2 { font-size: 1.18em; }
+.markdown-body h3 { font-size: 1.05em; }
+
+.markdown-body p {
+  margin: 0.5em 0;
+}
+
+.markdown-body ul,
+.markdown-body ol {
+  margin: 0.5em 0;
+  padding-left: 1.4em;
+}
+
+.markdown-body blockquote {
+  margin: 0.7em 0;
+  padding: 0.2em 0 0.2em 0.9em;
+  border-left: 3px solid var(--accent);
+  color: var(--muted);
+}
+
+.markdown-body code {
+  padding: 0.12em 0.35em;
+  border-radius: 4px;
+  background: var(--sidebar);
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.markdown-body pre {
+  padding: 0.8em 1em;
+  border-radius: 8px;
+  background: var(--sidebar);
+  overflow-x: auto;
+}
+
+.markdown-body pre code {
+  padding: 0;
+  background: transparent;
+}
+
+.markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 1em 0;
+}
+
+.markdown-body a {
+  color: var(--accent);
+  text-decoration: underline;
+}

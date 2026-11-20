@@ -1,0 +1,48 @@
+# Dependencies & frontend build
+node_modules/
+dist/
+.vite/
+
+# Rust & Tauri generated
+src-tauri/target/
+src-tauri/gen/schemas/
+
+# Android build caches, generated code & packaged artifacts
+src-tauri/gen/android/.gradle/
+src-tauri/gen/android/.kotlin/
+src-tauri/gen/android/build/
+src-tauri/gen/android/buildSrc/.gradle/
+src-tauri/gen/android/buildSrc/.kotlin/
+src-tauri/gen/android/buildSrc/build/
+src-tauri/gen/android/app/build/
+src-tauri/gen/android/app/src/main/assets/
+src-tauri/gen/android/app/src/main/jniLibs/
+src-tauri/gen/android/app/src/main/**/generated/
+src-tauri/gen/android/local.properties
+src-tauri/gen/android/keystore.properties
+src-tauri/gen/android/key.properties
+src-tauri/gen/android/tauri.settings.gradle
+src-tauri/gen/android/app/tauri.build.gradle.kts
+src-tauri/gen/android/app/proguard-tauri.pro
+src-tauri/gen/android/app/tauri.properties
+
+# Signing keys, binaries, secrets & local databases
+*.jks
+*.keystore
+*.p12
+*.apk
+*.aab
+*.idsig
+.env
+.env.*
+*.db
+*.db-wal
+*.db-shm
+
+# Local AI guidelines, OS & IDE
+GEMINI.md
+.DS_Store
+Thumbs.db
+*.log
+.vscode/
+.idea/
