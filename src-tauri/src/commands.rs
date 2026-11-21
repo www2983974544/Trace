@@ -1,4 +1,4 @@
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use chrono::Local;
 use rusqlite::Connection;
@@ -12,10 +12,12 @@ use crate::{
     db::{self, AiReport, AppSettings, Entry, EntrySummary},
     export::{self, ExportPreview, PeriodType},
     gemini,
+    lan_sync::{self, LanPeer, LanServerInfo, LanSyncOutcome, SyncServerHandle},
 };
 
 pub struct AppState {
-    pub db: Mutex<Connection>,
+    pub db: Arc<Mutex<Connection>>,
+    pub sync_server: Mutex<Option<SyncServerHandle>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -268,4 +270,99 @@ pub fn list_ai_reports(state: State<'_, AppState>, limit: usize) -> Result<Vec<A
 pub fn delete_ai_report(state: State<'_, AppState>, id: i64) -> Result<(), String> {
     let conn = state.db.lock().map_err(|_| "数据库锁定失败".to_string())?;
     db::delete_ai_report(&conn, id)
+}
+
+#[tauri::command]
+pub async fn start_lan_sync_server(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<LanServerInfo, String> {
+    {
+        let mut guard = state
+            .sync_server
+            .lock()
+            .map_err(|_| "快传状态锁定失败".to_string())?;
+        if let Some(existing) = guard.as_ref() {
+            if !existing.is_stopped() {
+                return Ok(existing.info().clone());
+            }
+        }
+        *guard = None;
+    }
+
+    let db = Arc::clone(&state.db);
+    let app_handle = app.clone();
+    let (handle, info) = lan_sync::start_server(db, move |evt| {
+        let _ = app_handle.emit("lan-sync-received", evt);
+    })
+    .await?;
+
+    let mut guard = state
+        .sync_server
+        .lock()
+        .map_err(|_| "快传状态锁定失败".to_string())?;
+    if let Some(prev) = guard.replace(handle) {
+        prev.stop();
+    }
+    Ok(info)
+}
+
+#[tauri::command]
+pub fn stop_lan_sync_server(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state
+        .sync_server
+        .lock()
+        .map_err(|_| "快传状态锁定失败".to_string())?;
+    if let Some(handle) = guard.take() {
+        handle.stop();
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn get_lan_sync_status(state: State<'_, AppState>) -> Result<Option<LanServerInfo>, String> {
+    let mut guard = state
+        .sync_server
+        .lock()
+        .map_err(|_| "快传状态锁定失败".to_string())?;
+    if let Some(handle) = guard.as_ref() {
+        if handle.is_stopped() {
+            *guard = None;
+            return Ok(None);
+        }
+        return Ok(Some(handle.info().clone()));
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+pub async fn discover_lan_peers(
+    state: State<'_, AppState>,
+    timeout_ms: Option<u64>,
+) -> Result<Vec<LanPeer>, String> {
+    let own_session_id = {
+        let mut guard = state
+            .sync_server
+            .lock()
+            .map_err(|_| "快传状态锁定失败".to_string())?;
+        match guard.as_ref() {
+            Some(handle) if !handle.is_stopped() => Some(handle.session_id().to_string()),
+            Some(_) => {
+                *guard = None;
+                None
+            }
+            None => None,
+        }
+    };
+    lan_sync::discover_peers(timeout_ms.unwrap_or(1800), own_session_id.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn sync_with_lan_peer(
+    state: State<'_, AppState>,
+    address: String,
+    pin: String,
+) -> Result<LanSyncOutcome, String> {
+    let db = Arc::clone(&state.db);
+    lan_sync::sync_with_peer(db, &address, &pin).await
 }

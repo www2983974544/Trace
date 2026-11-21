@@ -69,3 +69,31 @@ export interface GeminiTestResult {
   latencyMs: number;
   replyPreview: string;
 }
+
+export interface LanServerInfo {
+  ip: string;
+  port: number;
+  address: string;
+  pin: string;
+  deviceName: string;
+  platform: string;
+}
+
+export interface LanPeer {
+  deviceName: string;
+  platform: string;
+  ip: string;
+  port: number;
+  address: string;
+}
+
+export interface LanSyncOutcome {
+  remoteDeviceName: string;
+  localImport: ImportResult;
+  remoteImport: ImportResult;
+}
+
+export interface LanSyncReceivedEvent {
+  remoteDeviceName: string;
+  localImport: ImportResult;
+}

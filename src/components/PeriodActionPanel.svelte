@@ -1,6 +1,7 @@
 <script lang="ts">
   import { previewPeriodExport, saveTextToFile } from '../lib/api';
   import { PERIOD_LABELS } from '../lib/prompts';
+  import { APP_VERSION_LABEL } from '../lib/version';
   import type { PeriodType } from '../lib/types';
 
   interface Props {
@@ -8,7 +9,9 @@
     selectedPeriod: PeriodType;
     onSelectPeriod: (p: PeriodType) => void;
     onOpenAiPane: () => void;
+    onOpenSync: () => void;
     onOpenSettings: () => void;
+    onOpenChangelog: () => void;
   }
 
   let {
@@ -16,7 +19,9 @@
     selectedPeriod,
     onSelectPeriod,
     onOpenAiPane,
+    onOpenSync,
     onOpenSettings,
+    onOpenChangelog,
   }: Props = $props();
 
   const PERIODS: PeriodType[] = ['day', 'week', 'month', 'year'];
@@ -84,8 +89,14 @@
   {/if}
 
   <div class="panel-footer">
-    <button type="button" class="link-btn" onclick={onOpenSettings}>备份 / 恢复</button>
-    <button type="button" class="link-btn" onclick={onOpenSettings}>Gemini 与设置</button>
+    <button type="button" class="link-btn" onclick={onOpenSync}>Wi-Fi 快传</button>
+    <button type="button" class="link-btn" onclick={onOpenSettings}>备份 / 设置</button>
+    <button
+      type="button"
+      class="ver-btn"
+      title="查看版本更新日志"
+      onclick={onOpenChangelog}
+    >{APP_VERSION_LABEL}</button>
   </div>
 </section>
 
@@ -198,6 +209,21 @@
   }
 
   .link-btn:hover {
+    color: var(--accent);
+  }
+
+  .ver-btn {
+    font-size: 11px;
+    padding: 1px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: var(--bg);
+    color: var(--muted);
+    font-weight: 600;
+  }
+
+  .ver-btn:hover {
+    border-color: var(--accent);
     color: var(--accent);
   }
 </style>

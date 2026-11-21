@@ -9,6 +9,10 @@ import type {
   GeminiChunkPayload,
   GeminiTestResult,
   ImportResult,
+  LanPeer,
+  LanServerInfo,
+  LanSyncOutcome,
+  LanSyncReceivedEvent,
   PeriodType,
 } from './types';
 
@@ -68,4 +72,23 @@ export const onGeminiChunk = (
     if (event.payload.requestId === requestId) {
       onDelta(event.payload.delta);
     }
+  });
+
+export const startLanSyncServer = () => invoke<LanServerInfo>('start_lan_sync_server');
+
+export const stopLanSyncServer = () => invoke<void>('stop_lan_sync_server');
+
+export const getLanSyncStatus = () => invoke<LanServerInfo | null>('get_lan_sync_status');
+
+export const discoverLanPeers = (timeoutMs = 1800) =>
+  invoke<LanPeer[]>('discover_lan_peers', { timeoutMs });
+
+export const syncWithLanPeer = (address: string, pin: string) =>
+  invoke<LanSyncOutcome>('sync_with_lan_peer', { address, pin });
+
+export const onLanSyncReceived = (
+  onReceived: (payload: LanSyncReceivedEvent) => void,
+): Promise<UnlistenFn> =>
+  listen<LanSyncReceivedEvent>('lan-sync-received', (event) => {
+    onReceived(event.payload);
   });

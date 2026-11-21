@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import AiAssistantPane from './components/AiAssistantPane.svelte';
   import CalendarGrid from './components/CalendarGrid.svelte';
+  import ChangelogModal from './components/ChangelogModal.svelte';
   import ImmersiveEditor from './components/ImmersiveEditor.svelte';
   import PeriodActionPanel from './components/PeriodActionPanel.svelte';
   import SettingsBackupModal from './components/SettingsBackupModal.svelte';
@@ -17,6 +18,7 @@
     saveSettings,
   } from './lib/api';
   import { formatDateWithWeekday, parseYmd } from './lib/prompts';
+  import { APP_VERSION_LABEL } from './lib/version';
   import type { AppSettings, Entry, EntrySummary, ImportResult, PeriodType } from './lib/types';
 
   let todayDate = $state('');
@@ -43,6 +45,9 @@
     theme: 'system',
   });
   let modalOpen = $state(false);
+  let modalTab = $state<'sync' | 'backup' | 'settings'>('settings');
+  let changelogOpen = $state(false);
+  let syncRefreshTick = $state(0);
   let ready = $state(false);
   let initError = $state('');
 
@@ -155,9 +160,12 @@
     applyTheme(saved.theme);
   }
 
-  async function handleImportBackup(jsonContent: string, overwrite: boolean): Promise<ImportResult> {
-    await flushSave();
-    const res = await importBackupData(jsonContent, overwrite);
+  function openModal(tab: 'sync' | 'backup' | 'settings') {
+    modalTab = tab;
+    modalOpen = true;
+  }
+
+  async function refreshAfterExternalChange() {
     if (loadedDate) {
       const refreshed = await getEntry(loadedDate);
       editorContent = refreshed?.content ?? '';
@@ -170,6 +178,13 @@
       todayPreview = await getEntry(todayDate);
     }
     await refreshSideData();
+    syncRefreshTick += 1;
+  }
+
+  async function handleImportBackup(jsonContent: string, overwrite: boolean): Promise<ImportResult> {
+    await flushSave();
+    const res = await importBackupData(jsonContent, overwrite);
+    await refreshAfterExternalChange();
     return res;
   }
 
@@ -238,7 +253,9 @@
           {selectedPeriod}
           onSelectPeriod={(p) => (selectedPeriod = p)}
           onOpenAiPane={() => (desktopRightMode = 'ai')}
-          onOpenSettings={() => (modalOpen = true)}
+          onOpenSync={() => openModal('sync')}
+          onOpenSettings={() => openModal('settings')}
+          onOpenChangelog={() => (changelogOpen = true)}
         />
       </div>
     </aside>
@@ -249,10 +266,11 @@
           anchorDate={selectedDate}
           period={selectedPeriod}
           hasApiKey={Boolean(settings.geminiApiKey.trim())}
+          refreshKey={syncRefreshTick}
           showBackButton={true}
           onSelectPeriod={(p) => (selectedPeriod = p)}
           onBackToWrite={() => (desktopRightMode = 'editor')}
-          onOpenSettings={() => (modalOpen = true)}
+          onOpenSettings={() => openModal('settings')}
         />
       {:else}
         <ImmersiveEditor
@@ -288,9 +306,17 @@
       <div class="mobile-content">
         {#if mobileTab === 'today'}
           <header class="mob-topbar">
-            <span class="mob-brand">{todayDate.slice(0, 7)} · Trace</span>
-            <button type="button" class="mob-util-btn" onclick={() => (modalOpen = true)}>
-              备份 / 设置
+            <div class="mob-brand-row">
+              <span class="mob-brand">{todayDate.slice(0, 7)} · Trace</span>
+              <button
+                type="button"
+                class="mob-ver-btn"
+                title="查看版本更新日志"
+                onclick={() => (changelogOpen = true)}
+              >{APP_VERSION_LABEL}</button>
+            </div>
+            <button type="button" class="mob-util-btn" onclick={() => openModal('sync')}>
+              快传 / 设置
             </button>
           </header>
 
@@ -380,8 +406,9 @@
             anchorDate={selectedDate}
             period={selectedPeriod}
             hasApiKey={Boolean(settings.geminiApiKey.trim())}
+            refreshKey={syncRefreshTick}
             onSelectPeriod={(p) => (selectedPeriod = p)}
-            onOpenSettings={() => (modalOpen = true)}
+            onOpenSettings={() => openModal('settings')}
           />
         {/if}
       </div>
@@ -411,11 +438,19 @@
 
   <SettingsBackupModal
     open={modalOpen}
+    initialTab={modalTab}
     {settings}
     onClose={() => (modalOpen = false)}
     onSaveSettings={handleSaveSettings}
     onExportBackup={exportBackupFile}
     onImportBackup={handleImportBackup}
+    onBeforeSync={flushSave}
+    onSyncCompleted={refreshAfterExternalChange}
+  />
+
+  <ChangelogModal
+    open={changelogOpen}
+    onClose={() => (changelogOpen = false)}
   />
 {/if}
 
@@ -509,8 +544,24 @@
       flex-shrink: 0;
     }
 
+    .mob-brand-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
     .mob-brand {
       font-size: 15px;
+      font-weight: 600;
+    }
+
+    .mob-ver-btn {
+      font-size: 11px;
+      padding: 1px 7px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--muted);
       font-weight: 600;
     }
 

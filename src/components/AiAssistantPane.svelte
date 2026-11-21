@@ -16,6 +16,7 @@
     anchorDate: string;
     period: PeriodType;
     hasApiKey: boolean;
+    refreshKey?: number;
     showBackButton?: boolean;
     onSelectPeriod: (p: PeriodType) => void;
     onBackToWrite?: () => void;
@@ -26,6 +27,7 @@
     anchorDate,
     period,
     hasApiKey,
+    refreshKey = 0,
     showBackButton = false,
     onSelectPeriod,
     onBackToWrite,
@@ -81,6 +83,28 @@
       }
     } catch (e) {
       errorMsg = String(e);
+    }
+  });
+
+  let lastRefreshKey = -1;
+  $effect(() => {
+    const key = refreshKey;
+    if (lastRefreshKey === -1) {
+      lastRefreshKey = key;
+      return;
+    }
+    if (key !== lastRefreshKey) {
+      lastRefreshKey = key;
+      listAiReports(20)
+        .then((nextReports) => {
+          reports = nextReports;
+          if (!activeReport && nextReports.length > 0) {
+            activeReport = nextReports[0];
+          }
+        })
+        .catch((e) => {
+          errorMsg = String(e);
+        });
     }
   });
 

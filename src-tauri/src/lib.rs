@@ -3,8 +3,9 @@ mod commands;
 mod db;
 mod export;
 mod gemini;
+mod lan_sync;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::Connection;
 use tauri::Manager;
@@ -25,7 +26,8 @@ pub fn run() {
             let conn = Connection::open(db_path)?;
             db::init_db(&conn).map_err(std::io::Error::other)?;
             app.manage(AppState {
-                db: Mutex::new(conn),
+                db: Arc::new(Mutex::new(conn)),
+                sync_server: Mutex::new(None),
             });
             Ok(())
         })
@@ -46,6 +48,11 @@ pub fn run() {
             commands::analyze_period_with_gemini,
             commands::list_ai_reports,
             commands::delete_ai_report,
+            commands::start_lan_sync_server,
+            commands::stop_lan_sync_server,
+            commands::get_lan_sync_status,
+            commands::discover_lan_peers,
+            commands::sync_with_lan_peer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Trace");
