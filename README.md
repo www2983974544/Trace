@@ -7,9 +7,9 @@
 极简、本地优先的个人日记与 Gemini AI 周期复盘应用 —— 打开即写、月历打卡、多周期汇总导出与跨端数据迁移，提供 **Windows 桌面版** 与 **Android 移动版**。
 
 [![License: PolyForm Noncommercial 1.0.0](https://img.shields.io/badge/license-PolyForm%20Noncommercial%201.0.0-blue)](LICENSE)
-[![Release v1.1](https://img.shields.io/badge/Release-v1.1-3B5BDB)](https://github.com/www2983974544/Trace/releases/tag/v1.1)
-[![Windows](https://img.shields.io/badge/Windows-v1.1-0078D6)](https://github.com/www2983974544/Trace/releases/tag/v1.1)
-[![Android](https://img.shields.io/badge/Android-v1.1-3DDC84)](https://github.com/www2983974544/Trace/releases/tag/v1.1)
+[![Release v1.2](https://img.shields.io/badge/Release-v1.2-3B5BDB)](https://github.com/www2983974544/Trace/releases/tag/v1.2)
+[![Windows](https://img.shields.io/badge/Windows-v1.2-0078D6)](https://github.com/www2983974544/Trace/releases/tag/v1.2)
+[![Android](https://img.shields.io/badge/Android-v1.2-3DDC84)](https://github.com/www2983974544/Trace/releases/tag/v1.2)
 
 > **源码公开，禁止任何商业用途。** 采用 PolyForm Noncommercial License 1.0.0，详见 [LICENSE](LICENSE)。
 
@@ -17,11 +17,11 @@
 
 Trace 面向「把日常记录留给自己、需要时一键复盘」的个人写作场景：打开应用即停留在今天，无多余社交或云同步干扰；所有日记、设置与 AI 分析报告均存放在本地 SQLite 数据库中，同时支持通过单文件 `.json` 备份在 Windows 与 Android 之间自由迁移。
 
-Windows 桌面版与 Android 移动版基于同一套 **Tauri 2 + Svelte 5 + Rust** 代码库构建，保持统一版本号（当前 `v1.1`，对应配置 `1.1.0`），界面分别针对桌面与触屏交互设计：
+Windows 桌面版与 Android 移动版基于同一套 **Tauri 2 + Svelte 5 + Rust** 代码库构建，保持统一版本号（当前 `v1.2`，对应配置 `1.2.0`），界面分别针对桌面与触屏交互设计：
 
 | | Windows 桌面版 | Android 移动版 |
 | --- | --- | --- |
-| 当前版本 | `v1.1`（`1.1.0`） | `v1.1`（`1.1.0`） |
+| 当前版本 | `v1.2`（`1.2.0`） | `v1.2`（`1.2.0`） |
 | 运行环境 | Windows 10 / 11（x64，需 WebView2 运行时） | Android 7.0+（API 24+，ARM64） |
 | 技术栈 | Tauri 2 + Svelte 5 + Rust + SQLite | Tauri 2 Mobile + Svelte 5 + Rust + SQLite |
 | 分发包 | `.exe` 安装包（NSIS） / `.msi` 安装包 | `.apk` 安装包（Release 签名） |
@@ -32,7 +32,7 @@ Windows 桌面版与 Android 移动版基于同一套 **Tauri 2 + Svelte 5 + Rus
 - **双端独立布局**：
   - **桌面端**：左侧固定月历打卡网格与周期控制面板，右侧在「沉浸式写作」与「AI 复盘助手」之间切换。
   - **移动端**：首屏展示今日高权重卡片（含字数/预览）与近期历史列表，底部提供「今日 / 日历 / 导出 & AI」三标签导航，点击卡片进入全屏写作画布。
-- **局域网 Wi-Fi 双向快传同步**：Windows 与 Android 任意一端可开启快传服务并生成 6 位随机配对码，另一端通过 UDP 自动扫描或手动输入 `IP:端口` 直连（客户端自动绕过系统代理），单次往返完成日记与 AI 历史报告双向智能合并，API Key 仅保留在本机。
+- **局域网 Wi-Fi 双向快传同步**：Windows 与 Android 任意一端可开启快传服务并生成 6 位随机配对码，自动排除 Clash/Mihomo、虚拟机及蜂窝流量网卡，仅绑定真实 Wi-Fi/热点网卡进行子网发现与直连通信，单次往返完成日记与 AI 历史报告双向智能合并，API Key 仅保留在本机。
 - **月历打卡与多周期汇总**：按月标记已记录日期圆点，支持日历跳转与历史补录；按 **日 / 周 / 月 / 年** 统计实写篇数、字符数与估算 Token 数，一键导出 `.md` / `.txt` 或复制到剪贴板。
 - **Gemini AI 复盘助手**：
   - 内置日/周/月/年复盘提示词模板，支持自由编辑提示词。
@@ -78,8 +78,8 @@ Trace/
 
 前往 [GitHub Releases](https://github.com/www2983974544/Trace/releases) 下载对应平台安装包：
 
-- **Windows**：下载 `Trace_1.1.0_x64-setup.exe` 或 `Trace_1.1.0_x64_en-US.msi` 直接安装。
-- **Android**：下载 `Trace_1.1.0_arm64.apk` 安装（与 `v1.0` 使用同一正式签名，可直接覆盖升级）。
+- **Windows**：下载 `Trace_1.2.0_x64-setup.exe` 或 `Trace_1.2.0_x64_en-US.msi` 直接安装。
+- **Android**：下载 `Trace_1.2.0_arm64.apk` 安装（与 `v1.0` / `v1.1` 使用同一正式签名，可直接覆盖升级）。
 
 ## 本地开发与构建
 

@@ -134,9 +134,6 @@
       hasScannedOnce = false;
       peers = [];
       void ensureSyncListener();
-      if (initialTab === 'sync') {
-        void handleDiscoverPeers();
-      }
     } else if (!open && wasOpen) {
       wasOpen = false;
       void cleanupLanServer();
@@ -149,9 +146,6 @@
 
   function switchTab(tab: ModalTab) {
     activeTab = tab;
-    if (tab === 'sync' && !hasScannedOnce && !scanning) {
-      void handleDiscoverPeers();
-    }
   }
 
   async function handleStartServer() {
@@ -183,11 +177,11 @@
     }
   }
 
-  async function handleCopyServerAddress() {
-    if (!serverInfo) return;
+  async function handleCopyServerAddress(addr = serverInfo?.address) {
+    if (!addr) return;
     try {
-      await navigator.clipboard.writeText(serverInfo.address);
-      syncStatusMsg = `已复制连接地址：${serverInfo.address}`;
+      await navigator.clipboard.writeText(addr);
+      syncStatusMsg = `已复制连接地址：${addr}`;
     } catch (e) {
       syncErrorMsg = String(e);
     }
@@ -352,7 +346,7 @@
           <section class="block">
             <h3 class="block-title">方式一：本机开启快传服务（等待对方连接）</h3>
             <p class="hint">
-              需两台设备连接同一局域网 Wi-Fi。仅双向合并日记与 AI 历史报告，API Key 仅留在本机。Windows 首次开启如弹出防火墙提示，请点击允许访问。
+              快传为双向智能合并：任意一端发起一次同步，双端即同时更新为最新，无需两边各同步一次。仅同步日记与 AI 历史报告，API Key 仅留在本机。
             </p>
 
             {#if serverInfo}
@@ -366,14 +360,29 @@
                     <span class="field-label">本机地址（{serverInfo.deviceName}）</span>
                     <code class="addr-text">{serverInfo.address}</code>
                   </div>
-                  <button type="button" class="mini-btn" onclick={handleCopyServerAddress}>
+                  <button
+                    type="button"
+                    class="mini-btn"
+                    onclick={() => handleCopyServerAddress(serverInfo?.address)}
+                  >
                     复制地址
                   </button>
                 </div>
-                {#if serverInfo.ip === '127.0.0.1'}
-                  <p class="msg-warn">
-                    未检测到局域网 Wi-Fi IP，请确认设备已连接路由器或手机热点。
-                  </p>
+                {#if serverInfo.addresses.length > 1}
+                  <div class="alt-addrs">
+                    <span class="field-label">其他候选局域网地址（点击复制）：</span>
+                    <div class="alt-list">
+                      {#each serverInfo.addresses.slice(1) as altAddr}
+                        <button
+                          type="button"
+                          class="mini-btn"
+                          onclick={() => handleCopyServerAddress(altAddr)}
+                        >
+                          {altAddr}
+                        </button>
+                      {/each}
+                    </div>
+                  </div>
                 {/if}
                 <button
                   type="button"
@@ -408,6 +417,9 @@
                 {scanning ? '扫描中…' : '扫描设备'}
               </button>
             </div>
+            <p class="hint">
+              手机用流量开热点给电脑时，双方在同一热点网段内可直连互通；若手机开启了代理/VPN，请先开启“绕过局域网”或暂时关闭代理。
+            </p>
 
             {#if peers.length > 0}
               <div class="peer-list">
@@ -840,6 +852,18 @@
     word-break: break-all;
   }
 
+  .alt-addrs {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .alt-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
   .peer-list {
     display: flex;
     flex-direction: column;
@@ -917,11 +941,5 @@
     font-size: 12px;
     color: var(--danger);
     word-break: break-word;
-  }
-
-  .msg-warn {
-    margin: 0;
-    font-size: 12px;
-    color: #d97706;
   }
 </style>

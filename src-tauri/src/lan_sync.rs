@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream, UdpSocket},
-    sync::{watch, Notify},
+    sync::{mpsc, watch, Notify},
     time::Instant,
 };
 
@@ -34,6 +34,7 @@ pub struct LanServerInfo {
     pub ip: String,
     pub port: u16,
     pub address: String,
+    pub addresses: Vec<String>,
     pub pin: String,
     pub device_name: String,
     pub platform: String,
@@ -62,6 +63,16 @@ pub struct LanSyncOutcome {
 pub struct LanSyncReceivedEvent {
     pub remote_device_name: String,
     pub local_import: ImportResult,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanInterface {
+    pub name: String,
+    pub description: String,
+    pub ip: Ipv4Addr,
+    pub netmask: Ipv4Addr,
+    pub broadcast: Ipv4Addr,
+    pub priority: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,57 +188,380 @@ pub fn local_device_name() -> String {
     }
 }
 
-fn is_usable_lan_ipv4(ip: Ipv4Addr) -> bool {
-    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() || ip.is_broadcast() {
-        return false;
-    }
+pub fn is_rfc1918_private(ip: Ipv4Addr) -> bool {
     let o = ip.octets();
-    !(o[0] == 169 && o[1] == 254)
+    o[0] == 10 || (o[0] == 172 && (16..=31).contains(&o[1])) || (o[0] == 192 && o[1] == 168)
 }
 
-pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
-    let candidates = [
-        "192.168.1.1:80",
-        "192.168.0.1:80",
-        "10.0.0.1:80",
-        "172.16.0.1:80",
-        "223.5.5.5:80",
-        "8.8.8.8:80",
+pub fn is_clash_fake_ip(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 198 && (o[1] == 18 || o[1] == 19)
+}
+
+pub fn is_carrier_cgnat(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 100 && (64..=127).contains(&o[1])
+}
+
+pub fn netmask_from_prefix(prefix_len: u8) -> Ipv4Addr {
+    if prefix_len == 0 {
+        return Ipv4Addr::UNSPECIFIED;
+    }
+    let mask = if prefix_len >= 32 {
+        u32::MAX
+    } else {
+        u32::MAX << (32 - prefix_len)
+    };
+    Ipv4Addr::from(mask)
+}
+
+#[cfg(any(unix, test))]
+pub fn prefix_from_netmask(mask: Ipv4Addr) -> Option<u8> {
+    let raw = u32::from(mask);
+    let ones = raw.count_ones() as u8;
+    if raw == u32::from(netmask_from_prefix(ones)) {
+        Some(ones)
+    } else {
+        None
+    }
+}
+
+pub fn compute_broadcast(ip: Ipv4Addr, netmask: Ipv4Addr) -> Ipv4Addr {
+    let ip_u32 = u32::from(ip);
+    let mask_u32 = u32::from(netmask);
+    Ipv4Addr::from(ip_u32 | !mask_u32)
+}
+
+pub fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, netmask: Ipv4Addr) -> bool {
+    let mask = u32::from(netmask);
+    (u32::from(a) & mask) == (u32::from(b) & mask)
+}
+
+pub fn is_virtual_or_cellular_adapter(name: &str, desc: &str) -> bool {
+    let name_low = name.trim().to_ascii_lowercase();
+    let desc_low = desc.trim().to_ascii_lowercase();
+    let combined = format!("{name_low} {desc_low}");
+
+    let exact_prefixes = ["tun", "utun", "wg", "tap", "ppp"];
+    if exact_prefixes.iter().any(|p| name_low.starts_with(p)) {
+        return true;
+    }
+
+    let blocked_tokens = [
+        // 代理 / VPN / 隧道
+        "mihomo",
+        "meta tunnel",
+        "clash",
+        "sing-box",
+        "wintun",
+        "wireguard",
+        "tailscale",
+        "zerotier",
+        "openvpn",
+        "v2ray",
+        "nekobox",
+        "flclash",
+        "tunnel",
+        "tap-windows",
+        // 虚拟机 / 容器 / 蓝牙 / 回环
+        "vmware",
+        "vmnet",
+        "virtualbox",
+        "vbox",
+        "hyper-v",
+        "vethernet",
+        "wsl",
+        "docker",
+        "podman",
+        "bluetooth",
+        "蓝牙",
+        "loopback",
+        "isatap",
+        "teredo",
+        "npcap",
+        // 蜂窝移动流量与系统虚拟接口
+        "rmnet",
+        "ccmni",
+        "pdp",
+        "wwan",
+        "cdma",
+        "cellular",
+        "mobile",
+        "ims",
+        "clat",
+        "seth_lte",
+        "epdg",
+        "dummy",
     ];
-    let mut fallback: Option<Ipv4Addr> = None;
-    for target in candidates {
-        let Ok(sock) = std::net::UdpSocket::bind("0.0.0.0:0") else {
-            continue;
+
+    blocked_tokens.iter().any(|tok| combined.contains(tok))
+}
+
+fn is_allowed_lan_peer_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => is_rfc1918_private(v4) || v4.is_loopback(),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return true;
+            }
+            if let Some(mapped) = v6.to_ipv4_mapped() {
+                return is_rfc1918_private(mapped) || mapped.is_loopback();
+            }
+            false
+        }
+    }
+}
+
+fn sort_and_dedup_interfaces(mut list: Vec<LanInterface>) -> Vec<LanInterface> {
+    list.sort_by(|a, b| {
+        b.priority
+            .cmp(&a.priority)
+            .then_with(|| a.ip.cmp(&b.ip))
+    });
+    let mut seen_ips = Vec::with_capacity(list.len());
+    list.retain(|iface| {
+        if seen_ips.contains(&iface.ip) {
+            false
+        } else {
+            seen_ips.push(iface.ip);
+            true
+        }
+    });
+    list
+}
+
+#[cfg(windows)]
+unsafe fn wide_ptr_to_string(ptr: *const u16) -> String {
+    if ptr.is_null() {
+        return String::new();
+    }
+    let mut len = 0usize;
+    while *ptr.add(len) != 0 {
+        len += 1;
+    }
+    let slice = std::slice::from_raw_parts(ptr, len);
+    String::from_utf16_lossy(slice)
+}
+
+#[cfg(windows)]
+pub fn enumerate_lan_interfaces() -> Vec<LanInterface> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS},
+        NetworkManagement::{
+            IpHelper::{
+                GetAdaptersAddresses, GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST,
+                GAA_FLAG_SKIP_DNS_SERVER, GAA_FLAG_SKIP_MULTICAST, IF_TYPE_ETHERNET_CSMACD,
+                IF_TYPE_IEEE80211, IP_ADAPTER_ADDRESSES_LH,
+            },
+            Ndis::IfOperStatusUp,
+        },
+        Networking::WinSock::{AF_INET, SOCKADDR_IN},
+    };
+
+    let flags = GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER
+        | GAA_FLAG_INCLUDE_GATEWAYS;
+    let mut buf_len: u32 = 16 * 1024;
+    let mut buf: Vec<u8> = vec![0; buf_len as usize];
+
+    for _ in 0..3 {
+        let ret = unsafe {
+            GetAdaptersAddresses(
+                AF_INET as u32,
+                flags,
+                std::ptr::null(),
+                buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
+                &mut buf_len,
+            )
         };
-        if sock.connect(target).is_err() {
+        if ret == ERROR_SUCCESS {
+            break;
+        }
+        if ret == ERROR_BUFFER_OVERFLOW {
+            buf.resize(buf_len as usize, 0);
             continue;
         }
-        if let Ok(SocketAddr::V4(local)) = sock.local_addr() {
-            let ip = *local.ip();
-            if !is_usable_lan_ipv4(ip) {
+        return Vec::new();
+    }
+
+    let mut result = Vec::new();
+    let mut adapter_ptr = buf.as_ptr() as *const IP_ADAPTER_ADDRESSES_LH;
+
+    while !adapter_ptr.is_null() {
+        let adapter = unsafe { &*adapter_ptr };
+        adapter_ptr = adapter.Next;
+
+        if adapter.OperStatus != IfOperStatusUp {
+            continue;
+        }
+        // 排除回环(24)、PPP(23)、虚拟(53)、隧道(131)
+        if matches!(adapter.IfType, 23 | 24 | 53 | 131) {
+            continue;
+        }
+
+        let name = unsafe { wide_ptr_to_string(adapter.FriendlyName) };
+        let desc = unsafe { wide_ptr_to_string(adapter.Description) };
+        if is_virtual_or_cellular_adapter(&name, &desc) {
+            continue;
+        }
+
+        let has_gateway = !adapter.FirstGatewayAddress.is_null();
+        let mut base_priority: i32 = 0;
+        if has_gateway {
+            base_priority += 100;
+        }
+        if adapter.IfType == IF_TYPE_IEEE80211 {
+            base_priority += 40;
+        } else if adapter.IfType == IF_TYPE_ETHERNET_CSMACD {
+            base_priority += 30;
+        }
+        base_priority -= (adapter.Ipv4Metric.min(5_000)) as i32;
+
+        let mut unicast_ptr = adapter.FirstUnicastAddress;
+        while !unicast_ptr.is_null() {
+            let unicast = unsafe { &*unicast_ptr };
+            unicast_ptr = unicast.Next;
+
+            let sa_ptr = unicast.Address.lpSockaddr;
+            if sa_ptr.is_null()
+                || (unicast.Address.iSockaddrLength as usize) < std::mem::size_of::<SOCKADDR_IN>()
+            {
                 continue;
             }
-            if ip.is_private() {
-                return Some(ip);
+            let sa_family = unsafe { (*sa_ptr).sa_family };
+            if sa_family != AF_INET {
+                continue;
             }
-            if fallback.is_none() {
-                fallback = Some(ip);
+
+            let sin = unsafe { &*(sa_ptr as *const SOCKADDR_IN) };
+            let ip = Ipv4Addr::from(u32::from_be(unsafe { sin.sin_addr.S_un.S_addr }));
+            let prefix_len = unicast.OnLinkPrefixLength;
+
+            if !is_rfc1918_private(ip) || is_clash_fake_ip(ip) || is_carrier_cgnat(ip) {
+                continue;
             }
+            if !(8..=29).contains(&prefix_len) {
+                continue;
+            }
+
+            let netmask = netmask_from_prefix(prefix_len);
+            let broadcast = compute_broadcast(ip, netmask);
+            let ip_bonus = match ip.octets()[0] {
+                192 => 20,
+                10 => 10,
+                _ => 5,
+            };
+
+            result.push(LanInterface {
+                name: name.clone(),
+                description: desc.clone(),
+                ip,
+                netmask,
+                broadcast,
+                priority: base_priority + ip_bonus,
+            });
         }
     }
-    fallback
+
+    sort_and_dedup_interfaces(result)
 }
 
-fn subnet_broadcast_targets(local_ip: Option<Ipv4Addr>) -> Vec<SocketAddr> {
-    let mut targets = vec![SocketAddr::from((Ipv4Addr::BROADCAST, SYNC_DISCOVERY_PORT))];
-    if let Some(ip) = local_ip {
-        let o = ip.octets();
-        let directed = Ipv4Addr::new(o[0], o[1], o[2], 255);
-        if directed != Ipv4Addr::BROADCAST {
-            targets.push(SocketAddr::from((directed, SYNC_DISCOVERY_PORT)));
-        }
+#[cfg(unix)]
+pub fn enumerate_lan_interfaces() -> Vec<LanInterface> {
+    use std::ffi::CStr;
+
+    let mut head: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut head) } != 0 || head.is_null() {
+        return Vec::new();
     }
-    targets
+
+    let mut result = Vec::new();
+    let mut cur = head;
+
+    while !cur.is_null() {
+        let ifa = unsafe { &*cur };
+        cur = ifa.ifa_next;
+
+        let flags = ifa.ifa_flags;
+        let is_up = (flags & (libc::IFF_UP as libc::c_uint)) != 0;
+        let is_running = (flags & (libc::IFF_RUNNING as libc::c_uint)) != 0;
+        let is_loopback = (flags & (libc::IFF_LOOPBACK as libc::c_uint)) != 0;
+        let is_p2p = (flags & (libc::IFF_POINTOPOINT as libc::c_uint)) != 0;
+        let has_bcast = (flags & (libc::IFF_BROADCAST as libc::c_uint)) != 0;
+
+        // 严格剔除未启用、回环以及点对点网卡（蜂窝数据 rmnet/ccmni 与 VPN tun 均带 IFF_POINTOPOINT）
+        if !is_up || !is_running || is_loopback || is_p2p || !has_bcast {
+            continue;
+        }
+        if ifa.ifa_name.is_null() || ifa.ifa_addr.is_null() || ifa.ifa_netmask.is_null() {
+            continue;
+        }
+
+        let name = unsafe { CStr::from_ptr(ifa.ifa_name) }
+            .to_string_lossy()
+            .into_owned();
+        if is_virtual_or_cellular_adapter(&name, "") {
+            continue;
+        }
+
+        let addr_family = unsafe { (*ifa.ifa_addr).sa_family } as libc::c_int;
+        let mask_family = unsafe { (*ifa.ifa_netmask).sa_family } as libc::c_int;
+        if addr_family != libc::AF_INET || mask_family != libc::AF_INET {
+            continue;
+        }
+
+        let sin_addr = unsafe { &*(ifa.ifa_addr as *const libc::sockaddr_in) };
+        let sin_mask = unsafe { &*(ifa.ifa_netmask as *const libc::sockaddr_in) };
+        let ip = Ipv4Addr::from(u32::from_be(sin_addr.sin_addr.s_addr));
+        let netmask = Ipv4Addr::from(u32::from_be(sin_mask.sin_addr.s_addr));
+
+        if !is_rfc1918_private(ip) || is_clash_fake_ip(ip) || is_carrier_cgnat(ip) {
+            continue;
+        }
+        let Some(prefix_len) = prefix_from_netmask(netmask) else {
+            continue;
+        };
+        if !(8..=29).contains(&prefix_len) {
+            continue;
+        }
+
+        let low = name.to_ascii_lowercase();
+        let mut priority: i32 = if low.starts_with("ap")
+            || low.starts_with("swlan")
+            || low.starts_with("softap")
+            || low.starts_with("wlan")
+            || low.starts_with("en")
+        {
+            80
+        } else if low.starts_with("eth") || low.starts_with("rndis") {
+            60
+        } else {
+            20
+        };
+        priority += match ip.octets()[0] {
+            192 => 20,
+            10 => 10,
+            _ => 5,
+        };
+
+        result.push(LanInterface {
+            name: name.clone(),
+            description: name,
+            ip,
+            netmask,
+            broadcast: compute_broadcast(ip, netmask),
+            priority,
+        });
+    }
+
+    unsafe { libc::freeifaddrs(head) };
+    sort_and_dedup_interfaces(result)
+}
+
+#[cfg(not(any(windows, unix)))]
+pub fn enumerate_lan_interfaces() -> Vec<LanInterface> {
+    Vec::new()
 }
 
 pub fn normalize_peer_address(raw: &str) -> Result<String, String> {
@@ -274,6 +608,25 @@ pub async fn start_server<F>(
 where
     F: Fn(LanSyncReceivedEvent) + Send + Sync + 'static,
 {
+    let lan_ifaces = enumerate_lan_interfaces();
+    if lan_ifaces.is_empty() {
+        return Err(
+            "未检测到可用的 Wi-Fi 或个人热点局域网网卡，请先连接同一 Wi-Fi 或开启个人热点（已避免占用移动流量）"
+                .to_string(),
+        );
+    }
+    start_server_with_interfaces(db, lan_ifaces, true, on_received).await
+}
+
+async fn start_server_with_interfaces<F>(
+    db: Arc<Mutex<Connection>>,
+    lan_ifaces: Vec<LanInterface>,
+    enable_discovery: bool,
+    on_received: F,
+) -> Result<(SyncServerHandle, LanServerInfo), String>
+where
+    F: Fn(LanSyncReceivedEvent) + Send + Sync + 'static,
+{
     let listener = match TcpListener::bind(("0.0.0.0", SYNC_DEFAULT_PORT)).await {
         Ok(l) => l,
         Err(_) => TcpListener::bind(("0.0.0.0", 0))
@@ -285,20 +638,22 @@ where
         .map_err(|e| format!("读取快传端口失败：{e}"))?
         .port();
 
-    let lan_ip = detect_lan_ipv4();
-    let ip_str = lan_ip
-        .map(|ip| ip.to_string())
-        .unwrap_or_else(|| "127.0.0.1".to_string());
-    let address = format!("{ip_str}:{port}");
+    let primary_ip = lan_ifaces[0].ip.to_string();
+    let address = format!("{primary_ip}:{port}");
+    let addresses: Vec<String> = lan_ifaces
+        .iter()
+        .map(|iface| format!("{}:{port}", iface.ip))
+        .collect();
     let pin = generate_pin();
     let session_id = generate_session_id();
     let device_name = local_device_name();
     let platform = local_platform().to_string();
 
     let info = LanServerInfo {
-        ip: ip_str.clone(),
+        ip: primary_ip,
         port,
         address,
+        addresses,
         pin: pin.clone(),
         device_name: device_name.clone(),
         platform: platform.clone(),
@@ -309,22 +664,17 @@ where
     let failed_attempts = Arc::new(AtomicU8::new(0));
     let callback = Arc::new(on_received);
 
-    // 启动局域网设备发现信标与探测响应任务（绝不包含 PIN）
-    let beacon = DiscoveryBeacon {
-        app: "trace".to_string(),
-        session_id: session_id.clone(),
-        device_name: device_name.clone(),
-        platform: platform.clone(),
-        ip: ip_str.clone(),
-        port,
-    };
-    tokio::spawn(run_discovery_responder(
-        beacon,
-        lan_ip,
-        shutdown_rx.clone(),
-    ));
+    if enable_discovery {
+        tokio::spawn(run_discovery_responder(
+            lan_ifaces,
+            session_id.clone(),
+            device_name.clone(),
+            platform.clone(),
+            port,
+            shutdown_rx.clone(),
+        ));
+    }
 
-    // 启动 HTTP/1.1 快传服务主循环
     let server_info = info.clone();
     let server_shutdown_tx = shutdown_tx.clone();
     tokio::spawn(async move {
@@ -348,7 +698,11 @@ where
                 }
                 accepted = listener.accept() => {
                     match accepted {
-                        Ok((stream, _peer_addr)) => {
+                        Ok((stream, peer_addr)) => {
+                            if !is_allowed_lan_peer_ip(peer_addr.ip()) {
+                                drop(stream);
+                                continue;
+                            }
                             let db_ref = Arc::clone(&db);
                             let info_ref = server_info.clone();
                             let attempts_ref = Arc::clone(&failed_attempts);
@@ -389,48 +743,109 @@ where
     ))
 }
 
+struct NicDiscoverySender {
+    iface: LanInterface,
+    socket: UdpSocket,
+    beacon_bytes: Vec<u8>,
+}
+
 async fn run_discovery_responder(
-    beacon: DiscoveryBeacon,
-    lan_ip: Option<Ipv4Addr>,
+    lan_ifaces: Vec<LanInterface>,
+    session_id: String,
+    device_name: String,
+    platform: String,
+    port: u16,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
-    let socket = match UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)).await {
-        Ok(s) => s,
-        Err(_) => match UdpSocket::bind("0.0.0.0:0").await {
-            Ok(s) => s,
-            Err(_) => return,
-        },
-    };
-    let _ = socket.set_broadcast(true);
-    let Ok(payload) = serde_json::to_vec(&beacon) else {
+    let mut senders = Vec::with_capacity(lan_ifaces.len());
+    for iface in lan_ifaces {
+        let Ok(sock) = UdpSocket::bind(SocketAddr::from((iface.ip, 0))).await else {
+            continue;
+        };
+        let _ = sock.set_broadcast(true);
+        let beacon = DiscoveryBeacon {
+            app: "trace".to_string(),
+            session_id: session_id.clone(),
+            device_name: device_name.clone(),
+            platform: platform.clone(),
+            ip: iface.ip.to_string(),
+            port,
+        };
+        let Ok(beacon_bytes) = serde_json::to_vec(&beacon) else {
+            continue;
+        };
+        senders.push(NicDiscoverySender {
+            iface,
+            socket: sock,
+            beacon_bytes,
+        });
+    }
+
+    if senders.is_empty() {
         return;
-    };
-    let targets = subnet_broadcast_targets(lan_ip);
+    }
+
+    let listener_sock = UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)).await.ok();
     let mut recv_buf = [0u8; 512];
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    let mut tick = tokio::time::interval(Duration::from_millis(2500));
 
     loop {
-        tokio::select! {
-            _ = shutdown_rx.changed() => {
-                if *shutdown_rx.borrow() {
-                    break;
+        if let Some(sock) = listener_sock.as_ref() {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
                 }
-            }
-            _ = tick.tick() => {
-                for target in &targets {
-                    let _ = socket.send_to(&payload, target).await;
+                _ = tick.tick() => {
+                    for sender in &senders {
+                        let target = SocketAddr::from((sender.iface.broadcast, SYNC_DISCOVERY_PORT));
+                        let _ = sender.socket.send_to(&sender.beacon_bytes, target).await;
+                    }
                 }
-            }
-            recv_res = socket.recv_from(&mut recv_buf) => {
-                if let Ok((len, src)) = recv_res {
-                    if let Ok(probe) = serde_json::from_slice::<DiscoveryProbe>(&recv_buf[..len]) {
-                        if probe.app == "trace" && probe.probe == 1 {
-                            let _ = socket.send_to(&payload, src).await;
+                recv_res = sock.recv_from(&mut recv_buf) => {
+                    if let Ok((len, src)) = recv_res {
+                        if !is_allowed_lan_peer_ip(src.ip()) {
+                            continue;
+                        }
+                        if let Ok(probe) = serde_json::from_slice::<DiscoveryProbe>(&recv_buf[..len]) {
+                            if probe.app == "trace" && probe.probe == 1 {
+                                reply_matching_nic(&senders, src).await;
+                            }
                         }
                     }
                 }
             }
+        } else {
+            tokio::select! {
+                _ = shutdown_rx.changed() => {
+                    if *shutdown_rx.borrow() {
+                        break;
+                    }
+                }
+                _ = tick.tick() => {
+                    for sender in &senders {
+                        let target = SocketAddr::from((sender.iface.broadcast, SYNC_DISCOVERY_PORT));
+                        let _ = sender.socket.send_to(&sender.beacon_bytes, target).await;
+                    }
+                }
+            }
         }
+    }
+}
+
+async fn reply_matching_nic(senders: &[NicDiscoverySender], src: SocketAddr) {
+    if let IpAddr::V4(src_v4) = src.ip() {
+        if let Some(matched) = senders
+            .iter()
+            .find(|s| same_subnet(src_v4, s.iface.ip, s.iface.netmask))
+        {
+            let _ = matched.socket.send_to(&matched.beacon_bytes, src).await;
+            return;
+        }
+    }
+    if let Some(first) = senders.first() {
+        let _ = first.socket.send_to(&first.beacon_bytes, src).await;
     }
 }
 
@@ -706,78 +1121,170 @@ async fn write_http_json(
     stream.flush().await
 }
 
+fn parse_beacon_if_valid(
+    raw: &[u8],
+    src_addr: SocketAddr,
+    own_session_id: Option<&str>,
+) -> Option<LanPeer> {
+    if !is_allowed_lan_peer_ip(src_addr.ip()) {
+        return None;
+    }
+    let beacon = serde_json::from_slice::<DiscoveryBeacon>(raw).ok()?;
+    if beacon.app != "trace" || beacon.port == 0 {
+        return None;
+    }
+    if own_session_id.is_some_and(|sid| sid == beacon.session_id) {
+        return None;
+    }
+    let peer_ip = match src_addr.ip() {
+        IpAddr::V4(v4) if is_rfc1918_private(v4) => v4.to_string(),
+        _ => beacon.ip,
+    };
+    let parsed_ip: Ipv4Addr = peer_ip.parse().ok()?;
+    if !is_rfc1918_private(parsed_ip) {
+        return None;
+    }
+    let address = format!("{peer_ip}:{}", beacon.port);
+    Some(LanPeer {
+        device_name: beacon.device_name,
+        platform: beacon.platform,
+        ip: peer_ip,
+        port: beacon.port,
+        address,
+    })
+}
+
 pub async fn discover_peers(
     timeout_ms: u64,
     own_session_id: Option<&str>,
 ) -> Result<Vec<LanPeer>, String> {
-    let wait_ms = timeout_ms.clamp(500, 5000);
-    let socket = match UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)).await {
-        Ok(s) => s,
-        Err(_) => UdpSocket::bind("0.0.0.0:0")
-            .await
-            .map_err(|e| format!("初始化局域网扫描失败：{e}"))?,
-    };
-    let _ = socket.set_broadcast(true);
-
-    let probe = br#"{"app":"trace","probe":1}"#;
-    let lan_ip = detect_lan_ipv4();
-    let targets = subnet_broadcast_targets(lan_ip);
-    for target in &targets {
-        let _ = socket.send_to(probe, target).await;
+    let lan_ifaces = enumerate_lan_interfaces();
+    if lan_ifaces.is_empty() {
+        // 不触碰蜂窝流量或虚拟 TUN 网卡
+        return Ok(Vec::new());
     }
 
-    let deadline = Instant::now() + Duration::from_millis(wait_ms);
-    let mut peers: HashMap<String, LanPeer> = HashMap::new();
-    let mut buf = [0u8; 2048];
-    let mut second_probe_sent = false;
+    let wait_ms = timeout_ms.clamp(500, 5000);
+    let (tx, mut rx) = mpsc::channel::<LanPeer>(32);
+    let (done_tx, done_rx) = watch::channel(false);
+    let own_sid = own_session_id.map(str::to_string);
 
+    // 1) 为每个真实局域网/热点网卡创建独立绑定在 iface.ip 的 UDP socket，只向对应子网广播发探测
+    for iface in lan_ifaces {
+        let Ok(sock) = UdpSocket::bind(SocketAddr::from((iface.ip, 0))).await else {
+            continue;
+        };
+        let _ = sock.set_broadcast(true);
+        let probe = br#"{"app":"trace","probe":1}"#;
+        let bcast_target = SocketAddr::from((iface.broadcast, SYNC_DISCOVERY_PORT));
+        let _ = sock.send_to(probe, bcast_target).await;
+
+        let tx_clone = tx.clone();
+        let mut done_clone = done_rx.clone();
+        let sid_clone = own_sid.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            let second_tick = tokio::time::sleep(Duration::from_millis(wait_ms / 2));
+            tokio::pin!(second_tick);
+            let mut sent_second = false;
+
+            loop {
+                tokio::select! {
+                    _ = done_clone.changed() => {
+                        if *done_clone.borrow() {
+                            break;
+                        }
+                    }
+                    _ = &mut second_tick, if !sent_second => {
+                        sent_second = true;
+                        let _ = sock.send_to(probe, bcast_target).await;
+                    }
+                    recv_res = sock.recv_from(&mut buf) => {
+                        if let Ok((len, src_addr)) = recv_res {
+                            if let Some(peer) = parse_beacon_if_valid(&buf[..len], src_addr, sid_clone.as_deref()) {
+                                let _ = tx_clone.send(peer).await;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    // 2) 若 17581 端口空闲，同步监听对方主动发出的周期信标
+    if let Ok(passive_sock) = UdpSocket::bind(("0.0.0.0", SYNC_DISCOVERY_PORT)).await {
+        let tx_clone = tx.clone();
+        let mut done_clone = done_rx.clone();
+        let sid_clone = own_sid;
+        tokio::spawn(async move {
+            let mut buf = [0u8; 2048];
+            loop {
+                tokio::select! {
+                    _ = done_clone.changed() => {
+                        if *done_clone.borrow() {
+                            break;
+                        }
+                    }
+                    recv_res = passive_sock.recv_from(&mut buf) => {
+                        if let Ok((len, src_addr)) = recv_res {
+                            if let Some(peer) = parse_beacon_if_valid(&buf[..len], src_addr, sid_clone.as_deref()) {
+                                let _ = tx_clone.send(peer).await;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    drop(tx);
+
+    let mut peers: HashMap<String, LanPeer> = HashMap::new();
+    let deadline = Instant::now() + Duration::from_millis(wait_ms);
     loop {
         let now = Instant::now();
         if now >= deadline {
             break;
         }
-        if !second_probe_sent && deadline - now <= Duration::from_millis(wait_ms / 2) {
-            second_probe_sent = true;
-            for target in &targets {
-                let _ = socket.send_to(probe, target).await;
+        match tokio::time::timeout(deadline - now, rx.recv()).await {
+            Ok(Some(peer)) => {
+                peers.insert(peer.address.clone(), peer);
             }
-        }
-
-        let remaining = deadline - now;
-        match tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
-            Ok(Ok((len, src_addr))) => {
-                let Ok(beacon) = serde_json::from_slice::<DiscoveryBeacon>(&buf[..len]) else {
-                    continue;
-                };
-                if beacon.app != "trace" || beacon.port == 0 {
-                    continue;
-                }
-                if own_session_id.is_some_and(|sid| sid == beacon.session_id) {
-                    continue;
-                }
-                let peer_ip = match src_addr.ip() {
-                    IpAddr::V4(v4) if is_usable_lan_ipv4(v4) => v4.to_string(),
-                    _ => beacon.ip,
-                };
-                let address = format!("{peer_ip}:{}", beacon.port);
-                peers.insert(
-                    address.clone(),
-                    LanPeer {
-                        device_name: beacon.device_name,
-                        platform: beacon.platform,
-                        ip: peer_ip,
-                        port: beacon.port,
-                        address,
-                    },
-                );
-            }
-            Ok(Err(_)) | Err(_) => break,
+            Ok(None) | Err(_) => break,
         }
     }
+    let _ = done_tx.send(true);
 
     let mut list: Vec<LanPeer> = peers.into_values().collect();
     list.sort_by(|a, b| a.device_name.cmp(&b.device_name).then(a.address.cmp(&b.address)));
     Ok(list)
+}
+
+fn validate_sync_target(normalized_addr: &str) -> Result<Option<Ipv4Addr>, String> {
+    let Some((host, _)) = normalized_addr.rsplit_once(':') else {
+        return Err("连接地址格式无效".to_string());
+    };
+    if let Ok(ip) = host.parse::<Ipv4Addr>() {
+        if is_clash_fake_ip(ip) {
+            return Err(format!(
+                "地址 {ip} 属于 Clash/Mihomo 虚拟代理网卡，不是真实局域网 IP，请填写对方设备显示的 Wi-Fi 或热点地址"
+            ));
+        }
+        if !is_rfc1918_private(ip) && !ip.is_loopback() {
+            return Err(format!(
+                "为防止误走移动流量，仅支持连接局域网私有 IP（192.168.x.x / 10.x.x.x / 172.16-31.x.x），已拦截目标：{ip}"
+            ));
+        }
+        return Ok(Some(ip));
+    }
+    if host.eq_ignore_ascii_case("localhost") {
+        return Ok(Some(Ipv4Addr::LOCALHOST));
+    }
+    Err("请直接填写对方设备的局域网 IP:端口（例如 192.168.81.57:17580）".to_string())
 }
 
 pub async fn sync_with_peer(
@@ -786,9 +1293,35 @@ pub async fn sync_with_peer(
     pin: &str,
 ) -> Result<LanSyncOutcome, String> {
     let normalized_addr = normalize_peer_address(address)?;
+    let target_ip = validate_sync_target(&normalized_addr)?;
     let clean_pin = pin.trim();
     if clean_pin.len() != 6 || !clean_pin.bytes().all(|b| b.is_ascii_digit()) {
         return Err("请输入 6 位数字配对码".to_string());
+    }
+
+    let mut local_bind_ip: Option<IpAddr> = None;
+    if let Some(ipv4) = target_ip {
+        if !ipv4.is_loopback() {
+            let lan_ifaces = enumerate_lan_interfaces();
+            if lan_ifaces.is_empty() {
+                return Err(
+                    "未检测到可用的 Wi-Fi 或个人热点局域网网卡，已阻止同步请求以避免走移动流量"
+                        .to_string(),
+                );
+            }
+            if let Some(matched) = lan_ifaces
+                .iter()
+                .find(|iface| same_subnet(ipv4, iface.ip, iface.netmask))
+            {
+                local_bind_ip = Some(IpAddr::V4(matched.ip));
+            } else if cfg!(target_os = "android") {
+                let ips: Vec<String> = lan_ifaces.iter().map(|i| i.ip.to_string()).collect();
+                return Err(format!(
+                    "目标地址 {ipv4} 与本机当前局域网/热点网卡（{}）不在同一网段，已拦截以防误走手机流量。请核对对方显示的真实局域网 IP",
+                    ips.join("、")
+                ));
+            }
+        }
     }
 
     let db_for_export = Arc::clone(&db);
@@ -801,10 +1334,14 @@ pub async fn sync_with_peer(
     .await
     .map_err(|e| format!("导出本地数据失败：{e}"))??;
 
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .no_proxy()
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+        .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS));
+    if let Some(bind_ip) = local_bind_ip {
+        client_builder = client_builder.local_address(bind_ip);
+    }
+    let client = client_builder
         .build()
         .map_err(|e| format!("初始化局域网客户端失败：{e}"))?;
 
@@ -821,9 +1358,9 @@ pub async fn sync_with_peer(
         .await
         .map_err(|e| {
             if e.is_timeout() {
-                "连接对方设备超时：请确认双方处于同一局域网 Wi-Fi，且对方未锁屏或被系统防火墙拦截".to_string()
+                "连接对方设备超时：请确认双方处于同一局域网/热点，系统防火墙已放行；若手机开启了代理/VPN，请先配置绕过局域网或暂时关闭代理".to_string()
             } else if e.is_connect() {
-                "无法连接到对方设备：请确认对方已开启局域网快传、地址端口填写正确，且双方连接同一个 Wi-Fi".to_string()
+                "无法连接到对方设备：请确认对方已开启局域网快传、地址端口填写正确，且手机端未因代理/VPN 拦截局域网直连".to_string()
             } else {
                 format!("局域网同步请求失败：{e}")
             }
@@ -873,6 +1410,17 @@ mod tests {
         Arc::new(Mutex::new(conn))
     }
 
+    fn loopback_test_interface() -> Vec<LanInterface> {
+        vec![LanInterface {
+            name: "Loopback".to_string(),
+            description: "Loopback".to_string(),
+            ip: Ipv4Addr::LOCALHOST,
+            netmask: Ipv4Addr::new(255, 0, 0, 0),
+            broadcast: Ipv4Addr::new(127, 255, 255, 255),
+            priority: 1,
+        }]
+    }
+
     #[test]
     fn normalizes_peer_addresses_and_rejects_invalid() {
         assert_eq!(
@@ -886,6 +1434,104 @@ mod tests {
         assert!(normalize_peer_address("   ").is_err());
         assert!(normalize_peer_address("192.168.1.25:0").is_err());
         assert!(normalize_peer_address("192.168.1.25:abc").is_err());
+    }
+
+    #[test]
+    fn filters_virtual_vpn_and_cellular_adapters() {
+        assert!(is_virtual_or_cellular_adapter("Mihomo", "Meta Tunnel"));
+        assert!(is_virtual_or_cellular_adapter(
+            "VMware Network Adapter VMnet8",
+            "VMware Virtual Ethernet Adapter"
+        ));
+        assert!(is_virtual_or_cellular_adapter(
+            "VirtualBox Host-Only Network",
+            "VirtualBox Host-Only Ethernet Adapter"
+        ));
+        assert!(is_virtual_or_cellular_adapter("rmnet_data0", ""));
+        assert!(is_virtual_or_cellular_adapter("tun0", ""));
+        assert!(is_virtual_or_cellular_adapter("ccmni1", ""));
+        assert!(!is_virtual_or_cellular_adapter(
+            "WLAN",
+            "MediaTek Wi-Fi 6 MT7921 Wireless LAN Card"
+        ));
+        assert!(!is_virtual_or_cellular_adapter("wlan0", ""));
+        assert!(!is_virtual_or_cellular_adapter("ap0", ""));
+        assert!(!is_virtual_or_cellular_adapter("swlan0", ""));
+    }
+
+    #[test]
+    fn classifies_lan_vs_fake_ip_and_cgnat_and_broadcast() {
+        assert!(is_rfc1918_private(Ipv4Addr::new(192, 168, 81, 57)));
+        assert!(is_rfc1918_private(Ipv4Addr::new(10, 0, 0, 5)));
+        assert!(is_rfc1918_private(Ipv4Addr::new(172, 16, 1, 2)));
+        assert!(!is_rfc1918_private(Ipv4Addr::new(198, 18, 0, 1)));
+        assert!(is_clash_fake_ip(Ipv4Addr::new(198, 18, 0, 1)));
+        assert!(is_clash_fake_ip(Ipv4Addr::new(198, 19, 255, 254)));
+        assert!(is_carrier_cgnat(Ipv4Addr::new(100, 64, 0, 1)));
+        assert_eq!(
+            prefix_from_netmask(netmask_from_prefix(24)),
+            Some(24)
+        );
+        assert_eq!(
+            compute_broadcast(
+                Ipv4Addr::new(192, 168, 81, 57),
+                netmask_from_prefix(24)
+            ),
+            Ipv4Addr::new(192, 168, 81, 255)
+        );
+        assert!(same_subnet(
+            Ipv4Addr::new(192, 168, 81, 57),
+            Ipv4Addr::new(192, 168, 81, 63),
+            netmask_from_prefix(24)
+        ));
+        assert!(!same_subnet(
+            Ipv4Addr::new(192, 168, 81, 57),
+            Ipv4Addr::new(198, 18, 0, 1),
+            netmask_from_prefix(24)
+        ));
+    }
+
+    #[tokio::test]
+    async fn rejects_clash_fake_ip_and_public_ip_before_sending() {
+        let db = mem_db_arc();
+        let err_fake = sync_with_peer(Arc::clone(&db), "198.18.0.1:17580", "123456")
+            .await
+            .unwrap_err();
+        assert!(err_fake.contains("Mihomo"), "unexpected err: {err_fake}");
+
+        let err_pub = sync_with_peer(Arc::clone(&db), "8.8.8.8:17580", "123456")
+            .await
+            .unwrap_err();
+        assert!(err_pub.contains("局域网私有 IP"), "unexpected err: {err_pub}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_enumeration_excludes_mihomo_and_virtual_adapters() {
+        let ifaces = enumerate_lan_interfaces();
+        assert!(!ifaces.is_empty(), "expected at least one real LAN adapter");
+        for iface in &ifaces {
+            println!(
+                "DETECTED_IFACE: {} ({}) ip={} mask={} bcast={} prio={}",
+                iface.name, iface.description, iface.ip, iface.netmask, iface.broadcast, iface.priority
+            );
+            assert!(
+                is_rfc1918_private(iface.ip),
+                "unexpected non-RFC1918 ip: {}",
+                iface.ip
+            );
+            assert!(
+                !is_clash_fake_ip(iface.ip),
+                "Clash/Mihomo IP leaked: {}",
+                iface.ip
+            );
+            assert!(
+                !is_virtual_or_cellular_adapter(&iface.name, &iface.description),
+                "Virtual adapter leaked: {} ({})",
+                iface.name,
+                iface.description
+            );
+        }
     }
 
     #[tokio::test]
@@ -955,9 +1601,14 @@ mod tests {
 
         let received_events = Arc::new(Mutex::new(Vec::<LanSyncReceivedEvent>::new()));
         let events_clone = Arc::clone(&received_events);
-        let (handle, info) = start_server(Arc::clone(&db_server), move |evt| {
-            events_clone.lock().unwrap().push(evt);
-        })
+        let (handle, info) = start_server_with_interfaces(
+            Arc::clone(&db_server),
+            loopback_test_interface(),
+            false,
+            move |evt| {
+                events_clone.lock().unwrap().push(evt);
+            },
+        )
         .await
         .unwrap();
 
@@ -1023,9 +1674,14 @@ mod tests {
             db::upsert_entry(&conn, "2026-11-21", "不应被写入服务端").unwrap();
         }
 
-        let (handle, info) = start_server(Arc::clone(&db_server), |_| {})
-            .await
-            .unwrap();
+        let (handle, info) = start_server_with_interfaces(
+            Arc::clone(&db_server),
+            loopback_test_interface(),
+            false,
+            |_| {},
+        )
+        .await
+        .unwrap();
         let local_addr = format!("127.0.0.1:{}", info.port);
         let wrong_pin = if info.pin == "000000" {
             "999999"

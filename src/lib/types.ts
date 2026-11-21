@@ -74,6 +74,7 @@ export interface LanServerInfo {
   ip: string;
   port: number;
   address: string;
+  addresses: string[];
   pin: string;
   deviceName: string;
   platform: string;

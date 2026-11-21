@@ -1,6 +1,6 @@
 [package]
 name = "trace"
-version = "1.1.0"
+version = "1.2.0"
 description = "Minimalist local-first personal diary app"
 edition = "2021"
 
@@ -24,6 +24,10 @@ serde_json = "1"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 panic = "abort"
