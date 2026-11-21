@@ -30,6 +30,8 @@ src-tauri/gen/android/app/tauri.properties
 *.jks
 *.keystore
 *.p12
+*.exe
+*.msi
 *.apk
 *.aab
 *.idsig
